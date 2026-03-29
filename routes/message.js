@@ -255,6 +255,10 @@ async (req, res)  => {
 
     } else {
 
+      winston.info("[MsgRoute] Request exists — request_id: " + request.request_id +
+        " channel: " + (request.channel ? request.channel.name : 'UNDEFINED') +
+        " sender: " + (sender || req.user._id) +
+        " text: " + (req.body.text || '').substring(0, 50));
       winston.debug("request  exists", request.toObject());
       if (request.channel?.name === 'form') {
         if (!sender && request.participantsAgents?.[0] !== req.user.id) {

@@ -470,6 +470,57 @@ class Chat21Handler {
             });
 
 
+            // Forward incoming messages from external channels (Evolution, WhatsApp, etc.) to chat21/MQTT
+            // so that chat21-ionic can display them.
+            // Uses 'message.create.from.requester' instead of 'message.received' to:
+            //   1. Only fire on NEW messages (not status updates) — prevents chat21↔server loop
+            //   2. Only fire for messages from the lead (external user) — agents already come from chat21
+            messageEvent.on('message.create.from.requester', function(message) {
+                if (message &&
+                    message.request &&
+                    message.request.channelOutbound &&
+                    message.request.channelOutbound.name === ChannelConstants.CHAT21 &&
+                    message.request.channel &&
+                    message.request.channel.name !== ChannelConstants.CHAT21) {
+
+                    winston.info('[Chat21Handler] Forwarding external message to chat21 group — channel: ' +
+                        message.request.channel.name + ' sender: ' + message.sender +
+                        ' text: ' + (message.text || '').substring(0, 50));
+
+                    chat21.auth.setAdminToken(adminToken);
+
+                    var attributes = message.attributes || {};
+                    attributes['tiledesk_message_id'] = message._id;
+                    attributes['projectId'] = message.id_project;
+                    if (message.request.channel && message.request.channel.name) {
+                        attributes['request_channel'] = message.request.channel.name;
+                    }
+
+                    var recipient_fullname = "Guest";
+                    if (message.request && message.request.lead && message.request.lead.fullname) {
+                        recipient_fullname = message.request.lead.fullname;
+                    }
+
+                    var timestamp = Date.now();
+
+                    chat21.messages.sendToGroup(
+                        message.senderFullname,
+                        message.recipient,
+                        recipient_fullname,
+                        message.text,
+                        message.sender,
+                        attributes,
+                        message.type,
+                        message.metadata,
+                        timestamp
+                    ).then(function(data) {
+                        winston.info('[Chat21Handler] External message forwarded to chat21 group OK');
+                    }).catch(function(err) {
+                        winston.error('[Chat21Handler] Error forwarding external message to chat21 group', err);
+                    });
+                }
+            });
+
             requestEvent.on('request.attributes.update',  function(request) {          
 
                 setImmediate(() => {

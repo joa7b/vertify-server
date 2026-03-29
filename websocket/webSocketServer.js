@@ -244,6 +244,7 @@ class WebSocketServer {
             winston.debug(' messages: ');
 
             var recipientId = urlSub[3];
+            winston.info('[WS-Sub] Messages subscribe — projectId: ' + projectId + ' recipientId: ' + recipientId + ' user: ' + req.user._id);
             winston.debug('recipientId: ' + recipientId);
             // winston.debug(' req.: ',req);
 
@@ -256,9 +257,10 @@ class WebSocketServer {
                   return reject(err);
                 }
                 if (!projectuser) {
-                  winston.verbose('WebSocket project_user not found for user id ' + req.user._id + ' and projectid ' + projectId);
+                  winston.warn('[WS-Sub] Project_user NOT FOUND for user ' + req.user._id + ' project ' + projectId);
                   return reject({ err: 'Project_user not found for user id ' + req.user._id + ' and projectid ' + projectId });
                 }
+                winston.info('[WS-Sub] Project_user found — role: ' + projectuser.role);
 
                 var queryRequest = { id_project: projectId, request_id: recipientId };
 
@@ -278,10 +280,11 @@ class WebSocketServer {
                       return reject(err);
                     }
                     if (!request) {
-                      winston.verbose('WebSocket Request query not found for user id ' + req.user._id + ' and projectid ' + projectId);
+                      winston.warn('[WS-Sub] Request NOT FOUND for subscribe — recipientId: ' + recipientId + ' user: ' + req.user._id + ' query: ' + JSON.stringify(queryRequest));
                       return reject({ err: 'Request query not found for user id ' + req.user._id + ' and projectid ' + projectId });
                     }
 
+                    winston.info('[WS-Sub] Request found — channel: ' + (request.channel ? request.channel.name : 'UNDEFINED'));
                     winston.debug('found request for onSubscribeCallback', request);
 
 
@@ -296,6 +299,7 @@ class WebSocketServer {
                           winston.error('WebSocket Error finding message for onSubscribeCallback', err);
                           return reject(err);
                         }
+                        winston.info('[WS-Sub] Messages query returned ' + (messages ? messages.length : 0) + ' messages for recipientId: ' + recipientId);
                         winston.debug('onSubscribeCallback find', messages);
 
 
@@ -690,7 +694,10 @@ class WebSocketServer {
       setImmediate(async () => {
         winston.debug('messageEvent websocket server: ' + messageCreateKey, message);
         if (message.request) {
+          winston.info('[WS-Pub] Publishing message to WS — topic: /' + message.id_project + '/requests/' + message.request.request_id + '/messages sender: ' + message.sender + ' text: ' + (message.text || '').substring(0, 50));
           pubSubServer.handlePublishMessage('/' + message.id_project + '/requests/' + message.request.request_id + '/messages', message, undefined, true, "CREATE");
+        } else {
+          winston.warn('[WS-Pub] message.request is UNDEFINED — NOT publishing to WS. sender: ' + message.sender + ' recipient: ' + message.recipient);
         }
       });
     });

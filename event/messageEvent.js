@@ -52,15 +52,19 @@ function populateMessageUpdate(message) {
 
 function populateMessageWithRequest(message, eventPrefix) {
 
-  
+
   winston.debug("populateMessageWithRequest "+eventPrefix, message.toObject());
   winston.debug("populateMessageWithRequest "+eventPrefix +" "+ message.text);
-  
+  winston.info("[MsgEvent] populateMessageWithRequest called — eventPrefix: " + eventPrefix +
+    " recipient: " + message.recipient + " id_project: " + message.id_project +
+    " sender: " + message.sender + " status: " + message.status +
+    " text: " + (message.text || '').substring(0, 50));
+
   var messageJson = message.toJSON();
 
-  
+
     // cacherequest      // requestcachefarequi populaterequired cacheveryhightpriority
-    
+
   let q = Request.findOne({request_id:  message.recipient, id_project: message.id_project}).
   populate('lead').
   populate('department').  
@@ -83,7 +87,7 @@ function populateMessageWithRequest(message, eventPrefix) {
   q.exec(function (err, request) {
 
     if (err) {
-      winston.error("Error getting request on messageEvent.populateMessage",err );
+      winston.error("[MsgEvent] Error getting request on messageEvent.populateMessage — recipient: " + message.recipient + " id_project: " + message.id_project, err);
       return messageEvent.emit(eventPrefix, message);
     }
 
@@ -91,6 +95,9 @@ function populateMessageWithRequest(message, eventPrefix) {
 
 
   if (request) {
+      winston.info("[MsgEvent] Request FOUND — request_id: " + request.request_id +
+        " channel: " + (request.channel ? request.channel.name : 'UNDEFINED') +
+        " channelOutbound: " + (request.channelOutbound ? request.channelOutbound.name : 'UNDEFINED'));
       winston.debug("request is defined in messageEvent",request );
       
       // var requestJson = request.toJSON();
@@ -136,13 +143,16 @@ function populateMessageWithRequest(message, eventPrefix) {
 // 2021-01-26T10:30:16.045286+00:00 app[web.1]:     at /app/node_modules/kareem/index.js:135:16
 // 2021-01-26T10:30:16.045287+00:00 app[web.1]: 
 
+          winston.info("[MsgEvent] Emitting (bot branch): " + eventPrefix + ".request.channel." + request.channel.name +
+            " | " + eventPrefix + ".request.channelOutbound." + request.channelOutbound.name +
+            " | " + eventPrefix + ".channel." + message.channel.name);
           message2Event.emit(eventPrefix+'.request.channel.' + request.channel.name, messageJson );
           message2Event.emit(eventPrefix+'.request.channelOutbound.' + request.channelOutbound.name, messageJson );
           message2Event.emit(eventPrefix+'.channel.' + message.channel.name, messageJson );
 
         });
 
-        
+
       }else {
         messageJson.request = requestJson;
         winston.debug("message.emit",messageJson );
@@ -160,14 +170,17 @@ function populateMessageWithRequest(message, eventPrefix) {
           messageEvent.emit(eventPrefix+'.from.requester', messageJson );
         }
 
+        winston.info("[MsgEvent] Emitting (no-bot branch): " + eventPrefix + ".request.channel." + request.channel.name +
+          " | " + eventPrefix + ".request.channelOutbound." + request.channelOutbound.name +
+          " | " + eventPrefix + ".channel." + message.channel.name);
         message2Event.emit(eventPrefix+'.request.channel.' + request.channel.name, messageJson );
         message2Event.emit(eventPrefix+'.request.channelOutbound.' + request.channelOutbound.name, messageJson );
         message2Event.emit(eventPrefix+'.channel.' + message.channel.name, messageJson );
 
-      }   
-          
+      }
+
   } else {
-    winston.debug("request is undefined in messageEvent. Is it a direct or group message ?" );
+    winston.warn("[MsgEvent] Request NOT FOUND — recipient: " + message.recipient + " id_project: " + message.id_project + " — channel events will NOT fire");
     messageEvent.emit(eventPrefix,messageJson );
     message2Event.emit(eventPrefix+'.channel.' + message.channel.name, messageJson );
   }

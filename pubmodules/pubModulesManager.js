@@ -74,6 +74,9 @@ class PubModulesManager {
         this.cache = undefined;
 
         this.dialogFlow = undefined;
+
+        this.evolutionApi = undefined;
+        this.evolutionApiRoute = undefined;
     }
 
   
@@ -131,7 +134,12 @@ class PubModulesManager {
 
         if (this.dialogFlow) {
             app.use("/modules/dialogFlow", this.dialogFlow.dialogflowRoute);
-            winston.info("PubModulesManager dialogFlow controller loaded");       
+            winston.info("PubModulesManager dialogFlow controller loaded");
+        }
+
+        if (this.evolutionApiRoute) {
+            app.use('/modules/evolution-api', this.evolutionApiRoute);
+            winston.info("PubModulesManager evolutionApiRoute controller loaded");
         }
 
     }
@@ -585,7 +593,7 @@ class PubModulesManager {
 
         try {
             this.dialogFlow = require('./dialogflow');
-            winston.debug("this.dialogFlow:"+ this.dialogFlow);           
+            winston.debug("this.dialogFlow:"+ this.dialogFlow);
             this.dialogFlow.listener.listen(config);
             winston.info("PubModulesManager dialogFlow  initialized");
         } catch(err) {
@@ -593,6 +601,20 @@ class PubModulesManager {
                 winston.info("PubModulesManager init dialogFlow module not found");
             }else {
                 winston.error("PubModulesManager error initializing init dialogFlow module", err);
+            }
+        }
+
+        try {
+            this.evolutionApi = require('./evolution-api');
+            winston.debug("this.evolutionApi: " + this.evolutionApi);
+            this.evolutionApi.listener.listen(config);
+            this.evolutionApiRoute = this.evolutionApi.evolutionApiRoute;
+            winston.info("PubModulesManager initialized evolution-api.");
+        } catch(err) {
+            if (err.code == 'MODULE_NOT_FOUND') {
+                winston.info("PubModulesManager init evolution-api module not found");
+            } else {
+                winston.info("PubModulesManager error initializing evolution-api module", err);
             }
         }
     }
