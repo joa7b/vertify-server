@@ -460,15 +460,17 @@ router.post('/instances', async (req, res) => {
         // Explicitly set webhook after creation to ensure it's configured
         try {
             await evoRequest('POST', '/webhook/set/' + encodeURIComponent(instanceName), {
-                enabled: true,
-                url: webhookUrl,
-                webhookByEvents: false,
-                webhookBase64: false,
-                events: [
-                    'MESSAGES_UPSERT',
-                    'CONNECTION_UPDATE',
-                    'MESSAGES_UPDATE'
-                ]
+                webhook: {
+                    enabled: true,
+                    url: webhookUrl,
+                    webhookByEvents: false,
+                    webhookBase64: false,
+                    events: [
+                        'MESSAGES_UPSERT',
+                        'CONNECTION_UPDATE',
+                        'MESSAGES_UPDATE'
+                    ]
+                }
             });
             winston.info('[EvoAPI] Webhook configured for instance: ' + instanceName + ' -> ' + webhookUrl);
         } catch (whErr) {
