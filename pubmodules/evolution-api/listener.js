@@ -1,78 +1,27 @@
 var winston = require('../../config/winston');
-var configGlobal = require('../../config/global');
 var message2Event = require('../../event/message2Event');
-var rp = require('request-promise');
-
-function evoBaseUrl() {
-    const url = process.env.EVOLUTION_API_URL;
-    return url ? url.replace(/\/$/, '') : null;
-}
-
-function evoApiKey() {
-    return process.env.EVOLUTION_API_KEY;
-}
-
-function sendToEvolution(instance, to, text, type, metadata) {
-    const base = evoBaseUrl();
-    const key = evoApiKey();
-    if (!base || !key) {
-        return Promise.reject(new Error('EVOLUTION_API_URL or EVOLUTION_API_KEY not configured'));
-    }
-
-    var endpoint;
-    var body;
-
-    if (type === 'image' && metadata && metadata.src) {
-        endpoint = '/message/sendMedia/' + encodeURIComponent(instance);
-        body = {
-            number: to,
-            mediatype: 'image',
-            mimetype: metadata.type || 'image/jpeg',
-            caption: text || '',
-            media: metadata.src,
-            fileName: metadata.name || 'image'
-        };
-    } else if (type === 'file' && metadata && metadata.src) {
-        var mediatype = 'document';
-        if (metadata.type && metadata.type.startsWith('audio/')) {
-            mediatype = 'audio';
-        } else if (metadata.type && metadata.type.startsWith('video/')) {
-            mediatype = 'video';
-        }
-        endpoint = '/message/sendMedia/' + encodeURIComponent(instance);
-        body = {
-            number: to,
-            mediatype: mediatype,
-            mimetype: metadata.type || 'application/octet-stream',
-            caption: text || '',
-            media: metadata.src,
-            fileName: metadata.name || 'file'
-        };
-    } else {
-        // Default: send as text
-        endpoint = '/message/sendText/' + encodeURIComponent(instance);
-        body = {
-            number: to,
-            text: text
-        };
-    }
-
-    return rp({
-        method: 'POST',
-        uri: base + endpoint,
-        headers: { apikey: key, 'Content-Type': 'application/json' },
-        json: true,
-        body: body
-    });
-}
+var messageService = require('../../services/messageService');
+var MessageConstants = require('../../models/messageConstants');
+var evoClient = require('./evoClient');
+var evoCache = require('./evoCache');
+var sessionMonitor = require('./sessionMonitor');
+var Message = require('../../models/message');
 
 class Listener {
 
     listen(config) {
         winston.info('Evolution API Listener initialized');
 
-        const evolutionApiUrl = process.env.EVOLUTION_API_URL;
-        const evolutionApiKey = process.env.EVOLUTION_API_KEY;
+        // Initialize shared Redis cache for idempotency
+        if (config && config.tdCache) {
+            evoCache.init(config.tdCache);
+        }
+
+        // Start periodic session health checks
+        sessionMonitor.start();
+
+        var evolutionApiUrl = process.env.EVOLUTION_API_URL;
+        var evolutionApiKey = process.env.EVOLUTION_API_KEY;
 
         if (evolutionApiUrl) {
             winston.info('[EvoAPI] Evolution API URL: ' + evolutionApiUrl);
@@ -125,13 +74,41 @@ class Listener {
 
                 var msgType = messageJson.type || 'text';
                 var msgMetadata = messageJson.metadata || undefined;
+                var messageId = messageJson._id;
 
                 winston.info('[EvoAPI] Sending reply (' + msgType + ') to ' + phone + ' via instance ' + instance + ': ' + text.substring(0, 80));
 
-                sendToEvolution(instance, phone, text, msgType, msgMetadata).then(function(result) {
+                evoClient.sendMessage(instance, phone, text, msgType, msgMetadata).then(function(result) {
                     winston.info('[EvoAPI] Message sent successfully to ' + phone);
+
+                    // Store Evolution message ID for status correlation (MESSAGES_UPDATE events)
+                    var evoMessageId = result && result.key && result.key.id;
+                    if (messageId && evoMessageId) {
+                        Message.updateOne(
+                            { _id: messageId },
+                            { $set: { 'attributes.evoMessageId': evoMessageId } }
+                        ).catch(function(err) {
+                            winston.error('[EvoAPI] Error storing evoMessageId: ' + err.message);
+                        });
+                    }
+
+                    // Update message status to SENT
+                    if (messageId) {
+                        messageService.changeStatus(messageId, MessageConstants.CHAT_MESSAGE_STATUS.SENT)
+                            .catch(function(err) {
+                                winston.error('[EvoAPI] Error updating message status to SENT: ' + err.message);
+                            });
+                    }
                 }).catch(function(err) {
                     winston.error('[EvoAPI] Error sending message to Evolution API: ' + err.message);
+
+                    // Update message status to FAILED
+                    if (messageId) {
+                        messageService.changeStatus(messageId, MessageConstants.CHAT_MESSAGE_STATUS.FAILED)
+                            .catch(function(statusErr) {
+                                winston.error('[EvoAPI] Error updating message status to FAILED: ' + statusErr.message);
+                            });
+                    }
                 });
 
             } catch (err) {

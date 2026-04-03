@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const rp = require('request-promise');
 var winston = require('../../config/winston');
 var configGlobal = require('../../config/global');
 var leadService = require('../../services/leadService');
@@ -8,32 +7,71 @@ var requestService = require('../../services/requestService');
 var messageService = require('../../services/messageService');
 var MessageConstants = require('../../models/messageConstants');
 var Integration = require('../../models/integrations');
+var evoClient = require('./evoClient');
+var evoCache = require('./evoCache');
+var EvoWebhookEvent = require('./models/evoWebhookEvent');
+var webhookValidator = require('./webhookValidator');
 
 const apiUrl = process.env.API_URL || configGlobal.apiUrl;
 
-function evoBaseUrl() {
-    const url = process.env.EVOLUTION_API_URL;
-    return url ? url.replace(/\/$/, '') : null;
-}
+var Message = require('../../models/message');
 
-function evoApiKey() {
-    return process.env.EVOLUTION_API_KEY;
-}
+// Aliases for backward compatibility within this file
+var evoBaseUrl = evoClient.evoBaseUrl;
+var evoApiKey = evoClient.evoApiKey;
+var evoRequest = evoClient.evoRequest;
 
-function evoRequest(method, path, body) {
-    const base = evoBaseUrl();
-    const key = evoApiKey();
-    if (!base || !key) {
-        return Promise.reject(new Error('EVOLUTION_API_URL or EVOLUTION_API_KEY not configured'));
+// ---------------------------------------------------------------
+// Map Evolution API status codes to Tiledesk message status
+// Evolution: 1=PENDING, 2=SERVER_ACK(SENT), 3=DELIVERY_ACK(DELIVERED), 4=READ, 5=PLAYED
+// ---------------------------------------------------------------
+var EVO_STATUS_MAP = {
+    2: MessageConstants.CHAT_MESSAGE_STATUS.SENT,
+    3: MessageConstants.CHAT_MESSAGE_STATUS.DELIVERED,
+    4: MessageConstants.CHAT_MESSAGE_STATUS.SEEN,
+    5: MessageConstants.CHAT_MESSAGE_STATUS.SEEN // PLAYED (audio) → treat as seen
+};
+
+/**
+ * Process a messages.update event — delivery/read status from Evolution API.
+ * Finds the corresponding Tiledesk message and updates its status.
+ */
+async function processMessageStatusUpdate(data) {
+    // data can be a single update or array depending on Evolution API version
+    var updates = Array.isArray(data) ? data : [data];
+
+    for (var i = 0; i < updates.length; i++) {
+        var update = updates[i];
+        var key = update.key || (update.keyId ? { id: update.keyId } : null);
+        var status = update.status || (update.update && update.update.status);
+
+        if (!key || !key.id || !status) {
+            winston.debug('[EvoAPI] Skipping messages.update — missing key.id or status');
+            continue;
+        }
+
+        var tiledeskStatus = EVO_STATUS_MAP[status];
+        if (!tiledeskStatus) {
+            winston.debug('[EvoAPI] Ignoring messages.update with unmapped status: ' + status);
+            continue;
+        }
+
+        try {
+            // Find the Tiledesk message by the stored Evolution message ID
+            var msg = await Message.findOne({ 'attributes.evoMessageId': key.id });
+            if (msg) {
+                // Only update if the new status is higher (more advanced)
+                if (tiledeskStatus > (msg.status || 0)) {
+                    await messageService.changeStatus(msg._id, tiledeskStatus);
+                    winston.info('[EvoAPI] Message status updated: ' + key.id + ' -> ' + tiledeskStatus);
+                }
+            } else {
+                winston.debug('[EvoAPI] No Tiledesk message found for evoMessageId: ' + key.id);
+            }
+        } catch (err) {
+            winston.error('[EvoAPI] Error processing message status update: ' + err.message);
+        }
     }
-    const opts = {
-        method: method,
-        uri: base + path,
-        headers: { apikey: key, 'Content-Type': 'application/json' },
-        json: true
-    };
-    if (body) opts.body = body;
-    return rp(opts);
 }
 
 // ---------------------------------------------------------------
@@ -64,14 +102,60 @@ router.post('/webhook', async (req, res) => {
     // Acknowledge immediately
     res.status(200).json({ status: 'ok' });
 
+    // Persist raw payload before any parsing
+    var rawEventId = null;
     try {
-        if (body.event !== 'messages.upsert' || !body.data) {
-            winston.debug('[EvoAPI] Ignoring non-message event: ' + (body.event || 'unknown'));
+        var rawEvent = await EvoWebhookEvent.create({
+            instanceName: body.instance || 'unknown',
+            event: body.event || 'unknown',
+            messageId: (body.data && body.data.key && body.data.key.id) || undefined,
+            rawPayload: body
+        });
+        rawEventId = rawEvent._id;
+    } catch (rawErr) {
+        // Don't block processing if raw persistence fails (e.g., duplicate messageId on unique index)
+        winston.warn('[EvoAPI] Failed to persist raw webhook event: ' + rawErr.message);
+    }
+
+    try {
+        // Validate payload schema
+        var validation = webhookValidator.validate(body);
+        if (!validation.valid) {
+            winston.warn('[EvoAPI] Invalid webhook payload: ' + validation.reason);
+            if (rawEventId) {
+                EvoWebhookEvent.updateOne({ _id: rawEventId }, { error: 'Validation failed: ' + validation.reason, processedAt: new Date() }).catch(function() {});
+            }
             return;
         }
 
-        const data = body.data;
+        // Handle message status updates (delivered, read)
+        if (validation.event === 'messages.update') {
+            await processMessageStatusUpdate(validation.data);
+            if (rawEventId) {
+                EvoWebhookEvent.updateOne({ _id: rawEventId }, { processed: true, processedAt: new Date() }).catch(function() {});
+            }
+            return;
+        }
+
+        if (validation.event !== 'messages.upsert') {
+            winston.debug('[EvoAPI] Ignoring non-message event: ' + validation.event);
+            if (rawEventId) {
+                EvoWebhookEvent.updateOne({ _id: rawEventId }, { processed: true, processedAt: new Date() }).catch(function() {});
+            }
+            return;
+        }
+
+        const data = validation.data;
         if (data.key && data.key.fromMe) return; // ignore outgoing
+
+        // Idempotency check — skip if this event was already processed
+        if (data.key && data.key.id) {
+            var isNew = await evoCache.checkAndSetProcessed(data.key.id);
+            if (!isNew) {
+                winston.info('[EvoAPI] Duplicate webhook event ignored (messageId: ' + data.key.id + ')');
+                return;
+            }
+        }
 
         const instanceName = body.instance;
         const remoteJid = (data.key && data.key.remoteJid) || '';
@@ -246,7 +330,7 @@ router.post('/webhook', async (req, res) => {
                     id_project,       // id_project
                     lead_id,          // createdBy
                     MessageConstants.CHAT_MESSAGE_STATUS.RECEIVED,
-                    { channel: 'evolution', phone: phoneNumber, instance: instanceName, remoteJid: remoteJid }, // attributes
+                    { channel: 'evolution', phone: phoneNumber, instance: instanceName, remoteJid: remoteJid, evoMessageId: (data.key && data.key.id) || undefined }, // attributes
                     messageType,      // type
                     messageMetadata,  // metadata
                     undefined,        // language
@@ -304,7 +388,7 @@ router.post('/webhook', async (req, res) => {
                     id_project,
                     lead_id,
                     MessageConstants.CHAT_MESSAGE_STATUS.RECEIVED,
-                    { channel: 'evolution', phone: phoneNumber, instance: instanceName, remoteJid: remoteJid },
+                    { channel: 'evolution', phone: phoneNumber, instance: instanceName, remoteJid: remoteJid, evoMessageId: (data.key && data.key.id) || undefined },
                     messageType,
                     messageMetadata,
                     undefined,
@@ -316,8 +400,17 @@ router.post('/webhook', async (req, res) => {
                 winston.error('[EvoAPI][STEP 5] FAILED — Error creating first message: ' + msgErr.message);
             }
         }
+
+        // Mark raw event as successfully processed
+        if (rawEventId) {
+            EvoWebhookEvent.updateOne({ _id: rawEventId }, { processed: true, processedAt: new Date() }).catch(function() {});
+        }
     } catch (err) {
         winston.error('[EvoAPI] Webhook processing error: ' + err.message, err);
+        // Mark raw event with error
+        if (rawEventId) {
+            EvoWebhookEvent.updateOne({ _id: rawEventId }, { error: err.message, processedAt: new Date() }).catch(function() {});
+        }
     }
 });
 
@@ -540,5 +633,12 @@ router.get('/diagnose/:name', async (req, res) => {
 
     res.json(diag);
 });
+
+// ---------------------------------------------------------------
+// ACTION HANDLER — used by chatbot designer nodes (via webrequestv2)
+// POST /modules/evolution-api/actions/execute
+// ---------------------------------------------------------------
+var actionHandler = require('./actionHandler');
+router.use('/actions', actionHandler);
 
 module.exports = router;
